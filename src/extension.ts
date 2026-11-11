@@ -9,6 +9,7 @@ import {
   resolveNodeRuntime,
   resolveStorageDirectories,
 } from './config/settings.js';
+import { resolveGroqApiKey } from './config/envLoader.js';
 import { DiffProposalManager } from './editor/diffManager.js';
 import { McpWorkerClient } from './mcp/workerClient.js';
 import {
@@ -27,6 +28,7 @@ import {
 import { isRelPathEligible, normalizeRelPath, resolveContainedPath } from './worker/workspace.js';
 
 const GROQ_SECRET_KEY = 'agentocode.groqApiKey';
+let activeDeactivateHook: (() => Promise<void>) | null = null;
 
 function formatStatusReport(st: KnowledgeStatusSnapshot): string {
   const lines = [
@@ -66,6 +68,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let modelHistory: ChatCompletionMessage[] = [];
   let activeAbortController: AbortController | null = null;
   let saveDebounceTimer: NodeJS.Timeout | undefined;
+  let isDisposed = false;
 
   const proposalManager = new DiffProposalManager(getWorkspaceRoot);
   context.subscriptions.push(proposalManager);
@@ -134,9 +137,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     () => updateStatusBar(),
   );
 
+  const getResolvedApiKey = async () =>
+    resolveGroqApiKey({
+      workspaceRoot: vscode.workspace.isTrusted ? getWorkspaceRoot() : undefined,
+      extensionPath: context.extensionPath,
+      getSecret: () => context.secrets.get(GROQ_SECRET_KEY),
+    });
+
   const hasGroqApiKey = async (): Promise<boolean> => {
-    const stored = await context.secrets.get(GROQ_SECRET_KEY);
-    return Boolean(stored && stored.trim().length > 0);
+    const resolved = await getResolvedApiKey();
+    return Boolean(resolved.apiKey);
   };
 
   const updateStatusBar = () => {
@@ -174,8 +184,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const refreshStatusAndViews = async (pushChat = true): Promise<KnowledgeStatusSnapshot | null> => {
+    if (isDisposed) {
+      return null;
+    }
     const apiKeyPresent = await hasGroqApiKey();
-    if (vscode.workspace.isTrusted && getWorkspaceRoot()) {
+    if (!isDisposed && vscode.workspace.isTrusted && getWorkspaceRoot()) {
       try {
         latestStatus = await workerClient.getStatus();
       } catch (err: unknown) {
@@ -183,6 +196,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           `[host] Status fetch failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+    if (isDisposed) {
+      return null;
     }
     treeProvider.updateSnapshot({
       status: latestStatus,
@@ -267,7 +283,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
     await context.secrets.store(GROQ_SECRET_KEY, trimmed);
-    vscode.window.showInformationMessage('AgentoCode Groq API key saved to VS Code SecretStorage.');
+    const activeSource = (await getResolvedApiKey()).source;
+    if (activeSource === 'workspace_env' || activeSource === 'extension_env') {
+      vscode.window.showInformationMessage(
+        'Saved key to SecretStorage, but GROQ_API_KEY in .env currently takes precedence.',
+      );
+    } else {
+      vscode.window.showInformationMessage('AgentoCode Groq API key saved to VS Code SecretStorage.');
+    }
     await refreshStatusAndViews(true);
   };
 
@@ -354,10 +377,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
 
-    const apiKey = (await context.secrets.get(GROQ_SECRET_KEY))?.trim();
+    const resolvedKey = await getResolvedApiKey();
+    const apiKey = resolvedKey.apiKey;
     if (!apiKey) {
       const choice = await vscode.window.showWarningMessage(
-        'Groq API key is not set. Set it now to query AgentoCode.',
+        'GROQ_API_KEY is not set in .env, environment variables, or SecretStorage.',
         'Set Groq API Key',
       );
       if (choice === 'Set Groq API Key') {
@@ -555,6 +579,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
+  const shutdownExtension = async (): Promise<void> => {
+    isDisposed = true;
+    if (saveDebounceTimer) {
+      clearTimeout(saveDebounceTimer);
+      saveDebounceTimer = undefined;
+    }
+    activeAbortController?.abort();
+    activeAbortController = null;
+    await workerClient.dispose();
+  };
+  activeDeactivateHook = shutdownExtension;
+
   // Sync UI state when active editor, workspace trust, or configuration changes.
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(() => {
@@ -567,7 +603,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.workspace.onDidChangeConfiguration(async (ev) => {
-      if (!ev.affectsConfiguration('agentocode')) {
+      if (!ev.affectsConfiguration('agentocode') || isDisposed) {
         return;
       }
       const workerKeys = [
@@ -592,7 +628,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidSaveTextDocument((doc) => {
       const root = getWorkspaceRoot();
-      if (!root || !vscode.workspace.isTrusted || !getConfig().autoSyncOnSave) {
+      if (isDisposed || !root || !vscode.workspace.isTrusted) {
+        return;
+      }
+      if (doc.uri.scheme === 'file' && path.basename(doc.uri.fsPath) === '.env') {
+        void refreshStatusAndViews(true);
+        return;
+      }
+      if (!getConfig().autoSyncOnSave) {
         return;
       }
       if (doc.uri.scheme !== 'file') {
@@ -613,10 +656,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     {
       dispose: () => {
-        if (saveDebounceTimer) {
-          clearTimeout(saveDebounceTimer);
-        }
-        void workerClient.dispose();
+        void shutdownExtension();
       },
     },
   );
@@ -629,7 +669,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 }
 
-export function deactivate(): void {
-  // Subscriptions in ExtensionContext handle worker disposal cleanly.
+export async function deactivate(): Promise<void> {
+  const hook = activeDeactivateHook;
+  activeDeactivateHook = null;
+  if (hook) {
+    await hook();
+  }
 }
 

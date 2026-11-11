@@ -53,6 +53,10 @@ test('.gitignore, README.md, local logs, and GitHub Actions CI workflow exist an
     assert.ok(gitignore.includes(expected), `.gitignore missing ${expected}`);
   }
 
+  const vscodeignore = fs.readFileSync(path.resolve(process.cwd(), '.vscodeignore'), 'utf8');
+  assert.ok(vscodeignore.includes('.env'), '.vscodeignore must exclude .env');
+  assert.ok(vscodeignore.includes('.github/**'), '.vscodeignore must exclude .github/**');
+
   const readme = fs.readFileSync(path.resolve(process.cwd(), 'README.md'), 'utf8');
   assert.ok(readme.includes('npm test'));
   assert.ok(readme.includes('npm run build'));

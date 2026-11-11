@@ -13,6 +13,7 @@ import {
   resolveNodeRuntime,
   resolveStorageDirectories,
 } from '../src/config/settings.js';
+import { parseDotEnv, resolveGroqApiKey } from '../src/config/envLoader.js';
 
 test('GroqHttpClient parses chunked SSE text deltas and split tool call arguments', async () => {
   const server = http.createServer(async (req, res) => {
@@ -216,6 +217,68 @@ test('settings helpers handle workspace storage, invalid nodePath, and modelCach
     assert.equal(env.GUARDIAN_LOCAL_FILES_ONLY, '1');
     assert.equal(env.AGENTOCODE_MAX_TOKENS, '1024');
     assert.equal(env.GUARDIAN_MAX_DISTANCE, '0.5');
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('parseDotEnv and resolveGroqApiKey handle quotes, comments, empty keys, and fallback order', async () => {
+  const parsed = parseDotEnv(
+    [
+      '# Header comment',
+      'EMPTY_KEY=',
+      'export GROQ_API_KEY="gsk_quoted_123" # inline comment ignored inside quotes? no after quote',
+      "SINGLE='abc#123'",
+      'PLAIN=val_here # trailing comment',
+    ].join('\n'),
+  );
+  assert.equal(parsed.EMPTY_KEY, '');
+  assert.equal(parsed.SINGLE, 'abc#123');
+  assert.equal(parsed.PLAIN, 'val_here');
+
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'agentocode-dotenv-'));
+  const wsDir = path.join(dir, 'ws');
+  const extDir = path.join(dir, 'ext');
+  await fsp.mkdir(wsDir, { recursive: true });
+  await fsp.mkdir(extDir, { recursive: true });
+
+  try {
+    await fsp.writeFile(path.join(extDir, '.env'), 'GROQ_API_KEY="gsk_ext"\n', 'utf8');
+    await fsp.writeFile(path.join(wsDir, '.env'), 'GROQ_API_KEY=gsk_ws\n', 'utf8');
+
+    const wsFirst = await resolveGroqApiKey({
+      workspaceRoot: wsDir,
+      extensionPath: extDir,
+      processEnv: { GROQ_API_KEY: 'gsk_proc' },
+      getSecret: async () => 'gsk_secret',
+    });
+    assert.deepEqual(wsFirst, { apiKey: 'gsk_ws', source: 'workspace_env' });
+
+    await fsp.writeFile(path.join(wsDir, '.env'), 'GROQ_API_KEY=\n', 'utf8');
+    const extSecond = await resolveGroqApiKey({
+      workspaceRoot: wsDir,
+      extensionPath: extDir,
+      processEnv: { GROQ_API_KEY: 'gsk_proc' },
+      getSecret: async () => 'gsk_secret',
+    });
+    assert.deepEqual(extSecond, { apiKey: 'gsk_ext', source: 'extension_env' });
+
+    await fsp.unlink(path.join(extDir, '.env'));
+    const procThird = await resolveGroqApiKey({
+      workspaceRoot: wsDir,
+      extensionPath: extDir,
+      processEnv: { GROQ_API_KEY: 'gsk_proc' },
+      getSecret: async () => 'gsk_secret',
+    });
+    assert.deepEqual(procThird, { apiKey: 'gsk_proc', source: 'process_env' });
+
+    const secretFourth = await resolveGroqApiKey({
+      workspaceRoot: wsDir,
+      extensionPath: extDir,
+      processEnv: {},
+      getSecret: async () => 'gsk_secret',
+    });
+    assert.deepEqual(secretFourth, { apiKey: 'gsk_secret', source: 'secret_storage' });
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }
