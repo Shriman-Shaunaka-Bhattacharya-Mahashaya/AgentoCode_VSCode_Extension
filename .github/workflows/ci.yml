@@ -1,0 +1,48 @@
+name: AgentoCode CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    name: Build, Test & Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build test bundles and run all automated tests
+        run: npm test
+
+      - name: Build production extension bundles
+        run: npm run build
+
+      - name: Re-run tests against production worker bundle
+        run: node --test dist-test/*.test.cjs
+
+      - name: Verify production dist artifacts exist
+        shell: bash
+        run: |
+          test -f dist/extension.js
+          test -f dist/indexerWorker.cjs
+          test -f dist/webview.js
+          test -f dist/webview.css
+

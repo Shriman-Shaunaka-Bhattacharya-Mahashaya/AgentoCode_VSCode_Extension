@@ -1,0 +1,270 @@
+{
+  "name": "agentocode",
+  "displayName": "AgentoCode",
+  "description": "Local-indexed AI coding agent for VS Code with AST/structural knowledge base, local Nomic embeddings, diff-preview edits, and query-time Groq reasoning.",
+  "version": "0.1.0",
+  "publisher": "agentocode",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "AgentoCode indexes workspace files, stores local vectors, and runs a local Node embedding worker."
+    }
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentocode",
+          "title": "AgentoCode",
+          "icon": "media/agentocode.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentocode": [
+        {
+          "type": "webview",
+          "id": "agentocode.chatView",
+          "name": "Chat"
+        },
+        {
+          "id": "agentocode.knowledgeView",
+          "name": "Knowledge & Index"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agentocode.setApiKey",
+        "title": "AgentoCode: Set Groq API Key",
+        "icon": "$(key)"
+      },
+      {
+        "command": "agentocode.clearApiKey",
+        "title": "AgentoCode: Clear Groq API Key"
+      },
+      {
+        "command": "agentocode.syncKnowledge",
+        "title": "AgentoCode: Sync Knowledge & Vectors",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "agentocode.showStatus",
+        "title": "AgentoCode: Show Index & Model Status",
+        "icon": "$(info)"
+      },
+      {
+        "command": "agentocode.clearChat",
+        "title": "AgentoCode: Clear Chat History",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "agentocode.restartWorker",
+        "title": "AgentoCode: Restart Local Indexer Worker",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "agentocode.openLogs",
+        "title": "AgentoCode: Open Backend & Worker Logs",
+        "icon": "$(output)"
+      },
+      {
+        "command": "agentocode.preloadModel",
+        "title": "AgentoCode: Preload Local Embedding Model",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentocode.previewProposal",
+        "title": "AgentoCode: Preview Proposed Edit Diff",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "agentocode.applyProposal",
+        "title": "AgentoCode: Apply Proposed Edit",
+        "icon": "$(check)"
+      },
+      {
+        "command": "agentocode.rejectProposal",
+        "title": "AgentoCode: Reject Proposed Edit",
+        "icon": "$(close)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentocode.syncKnowledge",
+          "when": "view == agentocode.knowledgeView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentocode.showStatus",
+          "when": "view == agentocode.knowledgeView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "agentocode.openLogs",
+          "when": "view == agentocode.knowledgeView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "agentocode.clearChat",
+          "when": "view == agentocode.chatView",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "agentocode.previewProposal",
+          "when": "view == agentocode.knowledgeView && viewItem == proposalPending",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentocode.applyProposal",
+          "when": "view == agentocode.knowledgeView && viewItem == proposalPending",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentocode.rejectProposal",
+          "when": "view == agentocode.knowledgeView && viewItem == proposalPending",
+          "group": "inline@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AgentoCode",
+      "properties": {
+        "agentocode.generationModel": {
+          "type": "string",
+          "default": "openai/gpt-oss-120b",
+          "description": "Groq conversational model used strictly at query time (never called during indexing)."
+        },
+        "agentocode.embedProvider": {
+          "type": "string",
+          "enum": [
+            "transformers_onnx",
+            "ollama",
+            "lexical_only"
+          ],
+          "default": "transformers_onnx",
+          "description": "Local embedding provider running inside the dedicated Node worker."
+        },
+        "agentocode.embedModelId": {
+          "type": "string",
+          "default": "nomic-ai/nomic-embed-text-v1.5",
+          "description": "Hugging Face ONNX embedding model ID (or Ollama model name when embedProvider is 'ollama')."
+        },
+        "agentocode.embedModelRevision": {
+          "type": "string",
+          "default": "e9b6763023c676ca8431644204f50c2b100d9aab",
+          "description": "Pinned Hugging Face revision/commit for transformers_onnx (blank uses default branch)."
+        },
+        "agentocode.embedDtype": {
+          "type": "string",
+          "enum": [
+            "q8",
+            "fp32",
+            "fp16",
+            "q4"
+          ],
+          "default": "q8",
+          "description": "ONNX quantization dtype for local inference via @huggingface/transformers."
+        },
+        "agentocode.ollamaEndpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Local Ollama API endpoint when embedProvider is 'ollama'."
+        },
+        "agentocode.localFilesOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable network downloads from Hugging Face Hub when loading local embedding models."
+        },
+        "agentocode.maxTokens": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 256,
+          "maximum": 8192,
+          "description": "Verified operational token cap enforced during preflight tokenization without silent truncation."
+        },
+        "agentocode.maxDistance": {
+          "type": "number",
+          "default": 0.65,
+          "minimum": 0.05,
+          "maximum": 2.0,
+          "description": "Cosine-distance threshold (1 - cosineSimilarity) heuristic for semantic rag_search filtering."
+        },
+        "agentocode.stateLocation": {
+          "type": "string",
+          "enum": [
+            "extensionStorage",
+            "workspace"
+          ],
+          "default": "extensionStorage",
+          "description": "Store local vectors, manifest, and worker logs in VS Code extension storage (keeps git clean) or workspace .guardian/."
+        },
+        "agentocode.writeKnowledgeDocs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Generate deterministic local OKF v0.2 knowledge_base/ markdown documents during indexing (zero Groq calls)."
+        },
+        "agentocode.knowledgeDocsInWorkspace": {
+          "type": "boolean",
+          "default": false,
+          "description": "When writeKnowledgeDocs is enabled, write knowledge_base/ into the workspace root instead of extension storage."
+        },
+        "agentocode.nodePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Node.js executable path for the local MCP/embedding worker (defaults to 'node' on PATH, or Electron Node fallback)."
+        },
+        "agentocode.autoSyncOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically run local incremental indexing when opening a trusted workspace (100% local, zero Groq calls)."
+        },
+        "agentocode.autoSyncOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Debounced local re-indexing when workspace files are saved (100% local, zero Groq calls)."
+        },
+        "agentocode.maxAgentIterations": {
+          "type": "number",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 30,
+          "description": "Maximum tool-calling loop iterations per user query."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "build": "npm run typecheck && node esbuild.mjs --production",
+    "test": "npm run typecheck && node esbuild.mjs --test && node --test dist-test/*.test.cjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.2"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.8.3",
+    "zod": "^4.6.7"
+  }
+}
