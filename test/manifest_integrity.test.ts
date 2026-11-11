@@ -73,5 +73,17 @@ test('.gitignore, README.md, local logs, and GitHub Actions CI workflow exist an
   assert.ok(ci.includes('npm ci'));
   assert.ok(ci.includes('npm test'));
   assert.ok(ci.includes('npm run build'));
+  assert.ok(ci.includes('docker build --target test'));
+  assert.ok(ci.includes('docker build --target worker'));
+
+  const dockerfile = fs.readFileSync(path.resolve(process.cwd(), 'Dockerfile'), 'utf8');
+  assert.ok(dockerfile.includes('node:22-bookworm-slim'), 'Dockerfile must use Debian glibc for onnxruntime-node');
+  assert.ok(dockerfile.includes('USER node'), 'worker container should run as non-root node user');
+
+  const dockerignore = fs.readFileSync(path.resolve(process.cwd(), '.dockerignore'), 'utf8');
+  for (const ignored of ['.env', 'Prev_README.md', 'decision_log.md', 'problems.md', 'node_modules/', 'dist/']) {
+    assert.ok(dockerignore.includes(ignored), `.dockerignore missing ${ignored}`);
+  }
+  assert.ok(fs.existsSync(path.resolve(process.cwd(), 'docker-compose.yml')), 'missing docker-compose.yml');
 });
 

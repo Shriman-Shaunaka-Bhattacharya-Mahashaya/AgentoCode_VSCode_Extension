@@ -1,0 +1,28 @@
+services:
+  worker:
+    build:
+      context: .
+      target: worker
+    stdin_open: true
+    volumes:
+      - ${AGENTOCODE_TARGET_WORKSPACE:-.}:/workspace
+      - agentocode_state:/state
+      - agentocode_hf_cache:/hf-cache
+    environment:
+      AGENTOCODE_EMBED_PROVIDER: ${AGENTOCODE_EMBED_PROVIDER:-transformers_onnx}
+      AGENTOCODE_EMBED_MODEL_ID: ${AGENTOCODE_EMBED_MODEL_ID:-nomic-ai/nomic-embed-text-v1.5}
+      AGENTOCODE_EMBED_MODEL_REVISION: ${AGENTOCODE_EMBED_MODEL_REVISION:-e9b6763023c676ca8431644204f50c2b100d9aab}
+      AGENTOCODE_EMBED_DTYPE: ${AGENTOCODE_EMBED_DTYPE:-q8}
+      GUARDIAN_LOCAL_FILES_ONLY: ${GUARDIAN_LOCAL_FILES_ONLY:-0}
+
+  test:
+    build:
+      context: .
+      target: test
+    profiles:
+      - test
+
+volumes:
+  agentocode_state:
+  agentocode_hf_cache:
+
