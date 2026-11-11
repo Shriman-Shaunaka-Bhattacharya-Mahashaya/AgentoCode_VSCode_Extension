@@ -222,7 +222,7 @@ docker run -i --rm `
   agentocode-worker
 ```
 
-To skip downloading Hugging Face ONNX weights inside the container, pass `-e AGENTOCODE_EMBED_PROVIDER=lexical_only -e GUARDIAN_LOCAL_FILES_ONLY=1` (or set those variables for `docker compose run --rm -T worker`).
+To skip downloading Hugging Face ONNX weights inside the container, pass `-e AGENTOCODE_EMBED_PROVIDER=lexical_only -e GUARDIAN_LOCAL_FILES_ONLY=1` (or set those variables for `docker compose run --rm -T worker`). When bind-mounting Linux host folders into `/state` or `/hf-cache`, pass `--user "$(id -u):$(id -g)"` (and optionally `-v "$PWD:/workspace:ro"`) so generated files match your host UID/GID instead of container UID `1000`.
 
 ---
 

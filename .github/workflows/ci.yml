@@ -71,7 +71,6 @@ jobs:
         run: |
           WORK_DIR="$(mktemp -d)"
           STATE_DIR="$(mktemp -d)"
-          chmod 777 "$WORK_DIR" "$STATE_DIR"
           cat <<'EOF' > "$WORK_DIR/sample.ts"
           export function multiply(a: number, b: number): number {
             return a * b;
@@ -83,7 +82,8 @@ jobs:
             '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sync_knowledge","arguments":{"force":false}}}' \
             '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rag_search","arguments":{"query":"multiply","top_k":3}}}' \
             | docker run -i --rm \
-              -v "$WORK_DIR:/workspace" \
+              --user "$(id -u):$(id -g)" \
+              -v "$WORK_DIR:/workspace:ro" \
               -v "$STATE_DIR:/state" \
               -e AGENTOCODE_EMBED_PROVIDER=lexical_only \
               -e GUARDIAN_LOCAL_FILES_ONLY=1 \
