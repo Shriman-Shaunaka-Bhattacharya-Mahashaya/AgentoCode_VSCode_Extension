@@ -11,6 +11,7 @@ AgentoCode is a local-indexed AI coding assistant for Visual Studio Code. It com
 - [Knowledge, Indexing, and Retrieval](#knowledge-indexing-and-retrieval)
 - [Configuration](#configuration)
 - [Security and Workspace Boundaries](#security-and-workspace-boundaries)
+- [Docker](#docker)
 - [Development, Testing, and CI](#development-testing-and-ci)
 - [Known Scope and Limitations](#known-scope-and-limitations)
 
@@ -186,6 +187,45 @@ All settings live under the `agentocode` namespace in VS Code Settings:
 
 ---
 
+## Docker
+
+AgentoCode provides a multi-stage `Dockerfile` (`node:22-bookworm-slim` for `onnxruntime-node` glibc compatibility), `.dockerignore`, and `docker-compose.yml` to containerize reproducible builds, Linux CI testing, and the headless local MCP RAG worker (`dist/indexerWorker.cjs`). *(The VS Code extension UI host itself runs inside desktop VS Code rather than a plain headless Node container.)*
+
+### Build and Run Tests in Docker
+
+```powershell
+docker build --target test -t agentocode-test .
+docker run --rm agentocode-test
+```
+
+Or via Docker Compose:
+
+```powershell
+docker compose --profile test run --rm test
+```
+
+### Run the Headless MCP Worker Container
+
+Build the slim runtime stage (excludes dev dependencies, `.env`, and local logs; runs as non-root `node` user):
+
+```powershell
+docker build --target worker -t agentocode-worker .
+```
+
+Run the MCP stdio server against a mounted host directory:
+
+```powershell
+docker run -i --rm `
+  -v "${PWD}:/workspace" `
+  -v agentocode_state:/state `
+  -v agentocode_hf_cache:/hf-cache `
+  agentocode-worker
+```
+
+To skip downloading Hugging Face ONNX weights inside the container, pass `-e AGENTOCODE_EMBED_PROVIDER=lexical_only -e GUARDIAN_LOCAL_FILES_ONLY=1` (or set those variables for `docker compose run --rm -T worker`). When bind-mounting Linux host folders into `/state` or `/hf-cache`, pass `--user "$(id -u):$(id -g)"` (and optionally `-v "$PWD:/workspace:ro"`) so generated files match your host UID/GID instead of container UID `1000`.
+
+---
+
 ## Development, Testing, and CI
 
 ### Scripts
@@ -212,14 +252,20 @@ All settings live under the `agentocode` namespace in VS Code Settings:
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` runs on every `push` and `pull_request` across `ubuntu-latest` and `windows-latest` (Node 22):
+`.github/workflows/ci.yml` runs two jobs on every `push` and `pull_request`:
 
-1. `npm ci`
-2. `npm run typecheck`
-3. `npm test`
-4. `npm run build`
-5. `node --test dist-test/*.test.cjs` against the production worker bundle
-6. Verification that all `dist/` runtime artifacts exist
+1. **`verify` (`ubuntu-latest` and `windows-latest`, Node 22):**
+   - `npm ci`
+   - `npm run typecheck`
+   - `npm test`
+   - `npm run build`
+   - `node --test dist-test/*.test.cjs` against the production worker bundle
+   - Verification that all `dist/` runtime artifacts exist
+2. **`docker` (`ubuntu-latest`):**
+   - Builds the `test` Docker stage (`docker build --target test`) and runs `docker run --rm agentocode-test`
+   - Builds the slim `worker` runtime stage (`docker build --target worker`)
+   - Verifies `@huggingface/transformers` imports cleanly inside the Linux container
+   - Runs an end-to-end MCP JSON-RPC stdio smoke test (`sync_knowledge` + `rag_search`) against the containerized worker with a mounted workspace
 
 ---
 

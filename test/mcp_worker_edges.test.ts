@@ -152,3 +152,71 @@ test('compiled MCP worker keeps stdout strictly JSON-RPC even during errors and 
   }
 });
 
+test('compiled MCP worker flushes all pipelined responses when stdin closes immediately at EOF', async () => {
+  const ws = await fsp.mkdtemp(path.join(os.tmpdir(), 'agentocode-pipe-eof-'));
+  const workerBundle = path.resolve(process.cwd(), 'dist', 'indexerWorker.cjs');
+
+  try {
+    await fsp.writeFile(path.join(ws, 'calc.ts'), 'export function multiply(a: number, b: number) { return a * b; }\n', 'utf8');
+
+    const child = spawn(process.execPath, [workerBundle], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        AGENTOCODE_WORKSPACE_ROOT: ws,
+        AGENTOCODE_STATE_DIR: path.join(ws, '.guardian'),
+        AGENTOCODE_KNOWLEDGE_DIR: path.join(ws, '.guardian', 'knowledge_base'),
+        AGENTOCODE_EMBED_PROVIDER: 'lexical_only',
+        GUARDIAN_LOCAL_FILES_ONLY: '1',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdoutRaw = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutRaw += chunk.toString('utf8');
+    });
+
+    const batch =
+      [
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            clientInfo: { name: 'eof-batch-test', version: '1.0.0' },
+          },
+        }),
+        JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sync_knowledge', arguments: { force: false } } }),
+        JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'rag_search', arguments: { query: 'multiply', top_k: 3 } } }),
+      ].join('\n') + '\n';
+
+    // Close stdin immediately after writing the batch, matching piped CI/Docker runs.
+    child.stdin.end(batch);
+
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('Timed out waiting for pipelined worker exit')), 10000);
+      child.once('exit', (code) => {
+        clearTimeout(t);
+        resolve(code);
+      });
+    });
+
+    assert.equal(exitCode, 0);
+    const messages = stdoutRaw
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { id?: number; result?: unknown });
+
+    assert.equal(messages.length, 3);
+    const ragMsg = messages.find((m) => m.id === 3);
+    assert.ok(ragMsg && JSON.stringify(ragMsg.result).includes('calc.ts'));
+  } finally {
+    await fsp.rm(ws, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+

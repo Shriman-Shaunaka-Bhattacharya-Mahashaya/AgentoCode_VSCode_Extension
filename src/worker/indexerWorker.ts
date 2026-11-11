@@ -251,20 +251,82 @@ async function main(): Promise<void> {
 
   onLog(`Starting AgentoCode local worker (pid=${process.pid}, provider=${config.embedProvider}).`);
   const { server, engine } = await createAgentoMcpServer(config, onLog);
-  const transport = new StdioServerTransport();
+  const rawTransport = new StdioServerTransport();
+
+  let pendingRequests = 0;
+  let stdinEnded = false;
+  let shuttingDown = false;
 
   const shutdown = async () => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
     onLog('Shutting down AgentoCode local worker...');
     await server.close().catch(() => undefined);
     await engine.dispose().catch(() => undefined);
     process.exit(0);
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-  process.stdin.on('end', shutdown);
+  const maybeShutdownOnEof = () => {
+    if (!stdinEnded || pendingRequests > 0 || shuttingDown) {
+      return;
+    }
+    setImmediate(() => {
+      if (stdinEnded && pendingRequests === 0 && !shuttingDown) {
+        void shutdown();
+      }
+    });
+  };
 
-  await server.connect(transport);
+  const trackedTransport = {
+    start: () => rawTransport.start(),
+    close: () => rawTransport.close(),
+    send: async (msg: Parameters<StdioServerTransport['send']>[0]) => {
+      try {
+        await rawTransport.send(msg);
+      } finally {
+        if ('id' in msg && !('method' in msg)) {
+          pendingRequests = Math.max(0, pendingRequests - 1);
+          maybeShutdownOnEof();
+        }
+      }
+    },
+    set onmessage(handler: StdioServerTransport['onmessage']) {
+      rawTransport.onmessage = handler
+        ? (msg) => {
+            if ('id' in msg && 'method' in msg) {
+              pendingRequests++;
+            }
+            handler(msg);
+          }
+        : undefined;
+    },
+    get onmessage() {
+      return rawTransport.onmessage;
+    },
+    set onclose(handler: StdioServerTransport['onclose']) {
+      rawTransport.onclose = handler;
+    },
+    get onclose() {
+      return rawTransport.onclose;
+    },
+    set onerror(handler: StdioServerTransport['onerror']) {
+      rawTransport.onerror = handler;
+    },
+    get onerror() {
+      return rawTransport.onerror;
+    },
+  };
+
+  process.on('SIGINT', () => void shutdown());
+  process.on('SIGTERM', () => void shutdown());
+  process.stdin.on('end', () => {
+    stdinEnded = true;
+    maybeShutdownOnEof();
+  });
+
+  await server.connect(trackedTransport);
   onLog('AgentoCode local worker connected over MCP stdio.');
 }
 

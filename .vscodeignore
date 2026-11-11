@@ -6,6 +6,9 @@ test/**
 dist-test/**
 tsconfig.json
 esbuild.mjs
+Dockerfile
+.dockerignore
+docker-compose.yml
 Prev_README.md
 decision_log.md
 problems.md

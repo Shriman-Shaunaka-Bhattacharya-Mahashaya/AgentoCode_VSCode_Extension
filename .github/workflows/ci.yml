@@ -46,3 +46,58 @@ jobs:
           test -f dist/webview.js
           test -f dist/webview.css
 
+  docker:
+    name: Docker Build, Test & Worker Smoke (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker test image (runs typecheck, npm test, npm run build, post-build suite)
+        run: docker build --target test -t agentocode-test .
+
+      - name: Run automated test suite inside Docker test container
+        run: docker run --rm agentocode-test
+
+      - name: Build Docker worker runtime image
+        run: docker build --target worker -t agentocode-worker .
+
+      - name: Verify ONNX transformers module loads in Linux worker container
+        run: |
+          docker run --rm --entrypoint node agentocode-worker -e "import('@huggingface/transformers').then(m => { if (typeof m.pipeline !== 'function') process.exit(1); console.log('transformers ok'); })"
+
+      - name: Smoke-test containerized MCP worker over stdio JSON-RPC
+        run: |
+          WORK_DIR="$(mktemp -d)"
+          STATE_DIR="$(mktemp -d)"
+          cat <<'EOF' > "$WORK_DIR/sample.ts"
+          export function multiply(a: number, b: number): number {
+            return a * b;
+          }
+          EOF
+          printf '%s\n%s\n%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1.0.0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sync_knowledge","arguments":{"force":false}}}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rag_search","arguments":{"query":"multiply","top_k":3}}}' \
+            | docker run -i --rm \
+              --user "$(id -u):$(id -g)" \
+              -v "$WORK_DIR:/workspace:ro" \
+              -v "$STATE_DIR:/state" \
+              -e AGENTOCODE_EMBED_PROVIDER=lexical_only \
+              -e GUARDIAN_LOCAL_FILES_ONLY=1 \
+              agentocode-worker \
+            | node -e '
+              const fs = require("fs");
+              const lines = fs.readFileSync(0, "utf8").trim().split(/\r?\n/).filter(Boolean);
+              if (lines.length < 3) throw new Error("Expected 3 JSON-RPC responses, got " + lines.length);
+              const parsed = lines.map(l => JSON.parse(l));
+              const rag = parsed.find(m => m.id === 3);
+              if (!rag || !rag.result || !JSON.stringify(rag.result).includes("sample.ts")) {
+                throw new Error("Containerized rag_search missing sample.ts: " + JSON.stringify(rag));
+              }
+              console.log("Docker MCP stdio smoke test passed (" + lines.length + " JSON-RPC frames)");
+            '
+          rm -rf "$WORK_DIR" "$STATE_DIR"
+
