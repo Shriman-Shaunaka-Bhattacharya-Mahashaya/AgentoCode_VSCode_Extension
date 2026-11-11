@@ -11,6 +11,8 @@ function createLifecycleMockVscode(wsRoot: string, configOverrides: Record<strin
   const treeProviders = new Map<string, unknown>();
   const configListeners: Array<(ev: { affectsConfiguration(section: string): boolean }) => Promise<void> | void> = [];
   const saveListeners: Array<(doc: { uri: { scheme: string; fsPath: string } }) => void> = [];
+  const executedCommands: Array<{ cmd: string; args: unknown[] }> = [];
+  const appliedEditsCount = { value: 0 };
   const infoMessages: string[] = [];
   const warningMessages: string[] = [];
   const errorMessages: string[] = [];
@@ -102,11 +104,21 @@ function createLifecycleMockVscode(wsRoot: string, configOverrides: Record<strin
         saveListeners.push(fn);
         return { dispose: () => undefined };
       },
-      openTextDocument: async () => ({
-        lineCount: 1,
-        lineAt: () => ({ text: '' }),
-      }),
-      applyEdit: async () => true,
+      openTextDocument: async (uri: { fsPath: string }) => {
+        const fs = await import('node:fs');
+        const text = fs.existsSync(uri.fsPath) ? fs.readFileSync(uri.fsPath, 'utf8') : '';
+        const lines = text.split(/\r?\n/);
+        return {
+          uri,
+          lineCount: lines.length,
+          getText: () => text,
+          lineAt: (idx: number) => ({ text: lines[idx] ?? '' }),
+        };
+      },
+      applyEdit: async () => {
+        appliedEditsCount.value++;
+        return true;
+      },
     },
     window: {
       activeTextEditor: undefined,
@@ -154,7 +166,9 @@ function createLifecycleMockVscode(wsRoot: string, configOverrides: Record<strin
         registeredCommands.set(id, fn);
         return { dispose: () => undefined };
       },
-      executeCommand: async () => undefined,
+      executeCommand: async (cmd: string, ...args: unknown[]) => {
+        executedCommands.push({ cmd, args });
+      },
     },
   };
 
@@ -169,6 +183,8 @@ function createLifecycleMockVscode(wsRoot: string, configOverrides: Record<strin
     secretsStore,
     configListeners,
     saveListeners,
+    executedCommands,
+    appliedEditsCount,
     setNextInputBoxValue(v: string | undefined) {
       nextInputBoxValue = v;
     },
@@ -199,8 +215,8 @@ test('extension activate/deactivate wires commands, SecretStorage, ChatView CSP,
   };
 
   const subscriptions: Array<{ dispose(): void }> = [];
+  const ext = await import('../src/extension.js');
   try {
-    const ext = await import('../src/extension.js');
     const mockContext = {
       extensionPath: process.cwd(),
       extensionUri: harness.vscodeMock.Uri.file(process.cwd()),
@@ -308,15 +324,25 @@ test('extension activate/deactivate wires commands, SecretStorage, ChatView CSP,
     await receiveHandler!({ type: 'ready' });
     assert.equal(postedToWebview[postedToWebview.length - 1].payload?.hasApiKey, true);
 
-    assert.equal(harness.errorMessages.length, 0);
+    // Setting SecretStorage while .env defines GROQ_API_KEY warns about .env precedence.
+    await harness.registeredCommands.get('agentocode.setApiKey')!();
+    assert.ok(
+      harness.infoMessages.some((m) => m.includes('.env currently takes precedence')),
+    );
 
-    ext.deactivate();
+    // Saving .env refreshes state cleanly without crashing.
+    harness.saveListeners[0]({ uri: { scheme: 'file', fsPath: path.join(ws, '.env') } });
+    // Yield briefly so the async refresh kicked off by .env save completes before teardown.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(harness.errorMessages.length, 0);
   } finally {
+    await ext.deactivate().catch(() => undefined);
     for (const d of subscriptions) {
       d.dispose();
     }
     modAny._load = originalLoad;
-    await fsp.rm(ws, { recursive: true, force: true });
+    await fsp.rm(ws, { recursive: true, force: true, maxRetries: 15, retryDelay: 50 });
   }
 });
 

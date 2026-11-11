@@ -28,6 +28,7 @@ import {
 import { isRelPathEligible, normalizeRelPath, resolveContainedPath } from './worker/workspace.js';
 
 const GROQ_SECRET_KEY = 'agentocode.groqApiKey';
+let activeDeactivateHook: (() => Promise<void>) | null = null;
 
 function formatStatusReport(st: KnowledgeStatusSnapshot): string {
   const lines = [
@@ -67,6 +68,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let modelHistory: ChatCompletionMessage[] = [];
   let activeAbortController: AbortController | null = null;
   let saveDebounceTimer: NodeJS.Timeout | undefined;
+  let isDisposed = false;
 
   const proposalManager = new DiffProposalManager(getWorkspaceRoot);
   context.subscriptions.push(proposalManager);
@@ -182,8 +184,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const refreshStatusAndViews = async (pushChat = true): Promise<KnowledgeStatusSnapshot | null> => {
+    if (isDisposed) {
+      return null;
+    }
     const apiKeyPresent = await hasGroqApiKey();
-    if (vscode.workspace.isTrusted && getWorkspaceRoot()) {
+    if (!isDisposed && vscode.workspace.isTrusted && getWorkspaceRoot()) {
       try {
         latestStatus = await workerClient.getStatus();
       } catch (err: unknown) {
@@ -191,6 +196,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           `[host] Status fetch failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+    if (isDisposed) {
+      return null;
     }
     treeProvider.updateSnapshot({
       status: latestStatus,
@@ -275,7 +283,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
     await context.secrets.store(GROQ_SECRET_KEY, trimmed);
-    vscode.window.showInformationMessage('AgentoCode Groq API key saved to VS Code SecretStorage.');
+    const activeSource = (await getResolvedApiKey()).source;
+    if (activeSource === 'workspace_env' || activeSource === 'extension_env') {
+      vscode.window.showInformationMessage(
+        'Saved key to SecretStorage, but GROQ_API_KEY in .env currently takes precedence.',
+      );
+    } else {
+      vscode.window.showInformationMessage('AgentoCode Groq API key saved to VS Code SecretStorage.');
+    }
     await refreshStatusAndViews(true);
   };
 
@@ -564,6 +579,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
+  const shutdownExtension = async (): Promise<void> => {
+    isDisposed = true;
+    if (saveDebounceTimer) {
+      clearTimeout(saveDebounceTimer);
+      saveDebounceTimer = undefined;
+    }
+    activeAbortController?.abort();
+    activeAbortController = null;
+    await workerClient.dispose();
+  };
+  activeDeactivateHook = shutdownExtension;
+
   // Sync UI state when active editor, workspace trust, or configuration changes.
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(() => {
@@ -576,7 +603,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.workspace.onDidChangeConfiguration(async (ev) => {
-      if (!ev.affectsConfiguration('agentocode')) {
+      if (!ev.affectsConfiguration('agentocode') || isDisposed) {
         return;
       }
       const workerKeys = [
@@ -601,7 +628,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidSaveTextDocument((doc) => {
       const root = getWorkspaceRoot();
-      if (!root || !vscode.workspace.isTrusted) {
+      if (isDisposed || !root || !vscode.workspace.isTrusted) {
         return;
       }
       if (doc.uri.scheme === 'file' && path.basename(doc.uri.fsPath) === '.env') {
@@ -629,10 +656,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     {
       dispose: () => {
-        if (saveDebounceTimer) {
-          clearTimeout(saveDebounceTimer);
-        }
-        void workerClient.dispose();
+        void shutdownExtension();
       },
     },
   );
@@ -645,7 +669,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 }
 
-export function deactivate(): void {
-  // Subscriptions in ExtensionContext handle worker disposal cleanly.
+export async function deactivate(): Promise<void> {
+  const hook = activeDeactivateHook;
+  activeDeactivateHook = null;
+  if (hook) {
+    await hook();
+  }
 }
 

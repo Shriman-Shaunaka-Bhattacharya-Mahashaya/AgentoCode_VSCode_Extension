@@ -21,6 +21,7 @@ export class McpWorkerClient {
   private state: WorkerConnectionState = 'disconnected';
   private connectPromise: Promise<void> | null = null;
   private cachedTools: McpToolMetadata[] = [];
+  private disposeEpoch = 0;
 
   constructor(
     private readonly launchSpecFactory: () => McpWorkerLaunchSpec,
@@ -45,8 +46,11 @@ export class McpWorkerClient {
       return this.connectPromise;
     }
 
+    const epoch = this.disposeEpoch;
     this.connectPromise = (async () => {
       this.setState('connecting');
+      let transport: StdioClientTransport | null = null;
+      let client: Client | null = null;
       try {
         const spec = this.launchSpecFactory();
         const env: Record<string, string> = {
@@ -54,7 +58,7 @@ export class McpWorkerClient {
           ...spec.env,
         };
 
-        const transport = new StdioClientTransport({
+        transport = new StdioClientTransport({
           command: spec.command,
           args: spec.args,
           cwd: spec.cwd,
@@ -88,16 +92,26 @@ export class McpWorkerClient {
           this.setState('error');
         };
 
-        const client = new Client(
+        client = new Client(
           { name: 'agentocode-vscode-host', version: '0.1.0' },
           { capabilities: {} },
         );
 
         await client.connect(transport);
+        if (this.disposeEpoch !== epoch) {
+          await client.close().catch(() => undefined);
+          await transport.close().catch(() => undefined);
+          this.setState('disconnected');
+          return;
+        }
+
         this.transport = transport;
         this.client = client;
 
         const toolsRes = await client.listTools();
+        if (this.disposeEpoch !== epoch) {
+          return;
+        }
         this.cachedTools = toolsRes.tools.map((t) => ({
           name: t.name,
           description: t.description,
@@ -106,6 +120,12 @@ export class McpWorkerClient {
 
         this.setState('connected');
       } catch (err: unknown) {
+        if (client) {
+          await client.close().catch(() => undefined);
+        }
+        if (transport) {
+          await transport.close().catch(() => undefined);
+        }
         this.setState('error');
         const msg = err instanceof Error ? err.message : String(err);
         this.onLog(`Failed to connect MCP worker: ${msg}`);
@@ -181,7 +201,13 @@ export class McpWorkerClient {
   }
 
   async dispose(): Promise<void> {
+    this.disposeEpoch++;
     this.cachedTools = [];
+
+    if (this.connectPromise) {
+      await this.connectPromise.catch(() => undefined);
+    }
+
     const client = this.client;
     const transport = this.transport;
     this.client = null;
