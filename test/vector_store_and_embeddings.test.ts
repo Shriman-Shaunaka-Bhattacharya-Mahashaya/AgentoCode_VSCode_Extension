@@ -8,8 +8,10 @@ import test from 'node:test';
 import {
   applyPrefixOnce,
   LexicalOnlyEmbedder,
+  LoadedTransformersPipeline,
   OllamaEmbedder,
   resolveModelPrefixes,
+  TransformersOnnxEmbedder,
 } from '../src/worker/embeddings.js';
 import {
   computeVectorFingerprint,
@@ -250,5 +252,81 @@ test('LexicalOnlyEmbedder reports unloaded state and unavailable embeddings clea
   assert.equal(lex.getState(), 'unloaded');
   assert.equal((await lex.embedDocument('a')).ok, false);
   assert.equal((await lex.embedQuery('a')).ok, false);
+});
+
+test('TransformersOnnxEmbedder reuses resident pipeline, enforces preflight token cap, normalizes, and handles errors', async () => {
+  const seenInputs: string[] = [];
+  let loadCalls = 0;
+  let shouldFailLoad = false;
+
+  const embedder = new TransformersOnnxEmbedder({
+    modelId: 'nomic-ai/nomic-embed-text-v1.5',
+    modelRevision: 'rev-pinned',
+    dtype: 'q8',
+    localFilesOnly: true,
+    maxTokens: 4,
+    pipelineLoader: async () => {
+      loadCalls++;
+      if (shouldFailLoad) {
+        throw new Error('local snapshot missing');
+      }
+      const fn: LoadedTransformersPipeline = Object.assign(
+        async (text: string, opts?: { pooling?: string; normalize?: boolean }) => {
+          seenInputs.push(text);
+          assert.equal(opts?.pooling, 'mean');
+          assert.equal(opts?.normalize, true);
+          return { data: new Float32Array([3, 4, 0, 0]) };
+        },
+        {
+          tokenizer: {
+            encode: (text: string) => {
+              const words = text.trim().split(/\s+/);
+              return words.map((_, idx) => idx + 1);
+            },
+          },
+        },
+      );
+      return fn;
+    },
+  });
+
+  const docRes = await embedder.embedDocument('hello world');
+  assert.equal(docRes.ok, true);
+  if (docRes.ok) {
+    assert.equal(docRes.vector.length, 4);
+    assert.ok(Math.abs(docRes.vector[0] - 0.6) < 1e-5);
+  }
+
+  const queryRes = await embedder.embedQuery('find symbol');
+  assert.equal(queryRes.ok, true);
+  assert.equal(loadCalls, 1);
+
+  // Overlength input (> maxTokens=4) fails preflight WITHOUT invoking inference.
+  const inferCountBefore = seenInputs.length;
+  const tooLong = await embedder.embedDocument('one two three four five');
+  assert.equal(tooLong.ok, false);
+  if (!tooLong.ok) {
+    assert.equal(tooLong.reason, 'overlength');
+    assert.equal(tooLong.tokenCount, 6);
+  }
+  assert.equal(seenInputs.length, inferCountBefore);
+  assert.deepEqual(seenInputs, ['search_document: hello world', 'search_query: find symbol']);
+
+  const metrics = embedder.getMetrics();
+  assert.equal(metrics.loadCount, 1);
+  assert.equal(metrics.embedDocCalls, 1);
+  assert.equal(metrics.embedQueryCalls, 1);
+
+  await embedder.dispose();
+  assert.equal(embedder.getState(), 'unloaded');
+
+  shouldFailLoad = true;
+  const errRes = await embedder.embedQuery('retry');
+  assert.equal(errRes.ok, false);
+  if (!errRes.ok) {
+    assert.equal(errRes.reason, 'unavailable');
+  }
+  assert.equal(embedder.getState(), 'error');
+  assert.equal(embedder.getMetrics().lastError, 'local snapshot missing');
 });
 

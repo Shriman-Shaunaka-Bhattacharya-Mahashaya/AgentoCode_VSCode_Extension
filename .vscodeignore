@@ -10,5 +10,8 @@ Prev_README.md
 decision_log.md
 problems.md
 .gitignore
+.env
+.env.*
+!.env.example
 **/*.map
 

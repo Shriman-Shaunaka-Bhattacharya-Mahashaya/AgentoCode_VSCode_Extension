@@ -21,7 +21,7 @@ AgentoCode is a local-indexed AI coding assistant for Visual Studio Code. It com
 AgentoCode keeps codebase indexing strictly local and reserves remote LLM calls strictly for interactive user queries:
 
 - **Zero-LLM Local Indexing:** Workspace indexing extracts AST/structural facts, generates OKF v0.2 knowledge documents, and computes local embeddings without making Groq API calls.
-- **Query-Time Reasoning:** Groq (`openai/gpt-oss-120b` by default) runs only when you submit a question or request in chat, storing your API key in VS Code `SecretStorage`.
+- **Query-Time Reasoning:** Groq (`openai/gpt-oss-120b` by default) runs only when you submit a question or request in chat, reading `GROQ_API_KEY` from `.env` (gitignored) with fallback to environment variables or VS Code `SecretStorage`.
 - **Local Semantic + Lexical Retrieval:** Runs `nomic-ai/nomic-embed-text-v1.5` locally via `@huggingface/transformers` ONNX (or optional local Ollama) with live-hash freshness validation and automatic lexical fallback when no vector index is built.
 - **IDE-Native Diff Workflow:** File edits are never written directly to disk by background tools; every proposed change opens a VS Code diff preview (`vscode.diff`) that you approve or reject via undoable `WorkspaceEdit`s.
 - **Editor Context Integration:** Attaches active file path, cursor position, selected code, unsaved dirty editor buffers, and VS Code `Problems` diagnostics during query-time reasoning.
@@ -59,13 +59,13 @@ AgentoCode splits IDE interaction from CPU-heavy embedding and vector storage ac
 
 | Module | Responsibility |
 | --- | --- |
-| [src/extension.ts](src/extension.ts) | Activation, command registration, Status Bar updates, `SecretStorage`, Workspace Trust gating, and debounced save sync. |
-| [src/views/chatViewProvider.ts](src/views/chatViewProvider.ts), [src/webview/main.ts](src/webview/main.ts) | CSP-hardened Sidebar Chat Webview with streaming responses, collapsible tool traces, slash commands, and inline diff approval cards. |
-| [src/views/knowledgeTreeProvider.ts](src/views/knowledgeTreeProvider.ts) | Sidebar TreeView showing model state, vector/concept counts, failures, pending edit proposals, OKF knowledge documents, and quick actions. |
-| [src/agent/groqClient.ts](src/agent/groqClient.ts), [src/agent/agentLoop.ts](src/agent/agentLoop.ts) | Streaming SSE client for Groq Chat Completions and multi-turn tool orchestrator. |
-| [src/editor/diffManager.ts](src/editor/diffManager.ts), [src/workspace/ideContext.ts](src/workspace/ideContext.ts) | Virtual diff documents, conflict checking, undoable `WorkspaceEdit` application, active selection extraction, and VS Code diagnostics lookup. |
-| [src/mcp/workerClient.ts](src/mcp/workerClient.ts) | Manages the persistent Node worker subprocess (`node` on `PATH` or `ELECTRON_RUN_AS_NODE=1` fallback). |
-| [src/worker/indexerWorker.ts](src/worker/indexerWorker.ts) | Exposes `list_files`, `read_file`, `rag_search`, `read_concept`, `knowledge_status`, `sync_knowledge`, and `preload_model` over MCP stdio (raw disk `write_file` is omitted). |
+| `src/extension.ts` | Activation, command registration, Status Bar updates, `SecretStorage`, Workspace Trust gating, and debounced save sync. |
+| `src/views/chatViewProvider.ts`, `src/webview/main.ts` | CSP-hardened Sidebar Chat Webview with streaming responses, collapsible tool traces, slash commands, and inline diff approval cards. |
+| `src/views/knowledgeTreeProvider.ts` | Sidebar TreeView showing model state, vector/concept counts, failures, pending edit proposals, OKF knowledge documents, and quick actions. |
+| `src/agent/groqClient.ts`, `src/agent/agentLoop.ts` | Streaming SSE client for Groq Chat Completions and multi-turn tool orchestrator. |
+| `src/editor/diffManager.ts`, `src/workspace/ideContext.ts` | Virtual diff documents, conflict checking, undoable `WorkspaceEdit` application, active selection extraction, and VS Code diagnostics lookup. |
+| `src/mcp/workerClient.ts` | Manages the persistent Node worker subprocess (`node` on `PATH` or `ELECTRON_RUN_AS_NODE=1` fallback). |
+| `src/worker/indexerWorker.ts` | Exposes `list_files`, `read_file`, `rag_search`, `read_concept`, `knowledge_status`, `sync_knowledge`, and `preload_model` over MCP stdio (raw disk `write_file` is omitted). |
 
 ---
 
@@ -85,7 +85,7 @@ npm run build
 ```
 
 1. Open this repository in VS Code.
-2. Press `F5` (uses [.vscode/launch.json](.vscode/launch.json)) to launch an **Extension Development Host** window.
+2. Press `F5` (uses `.vscode/launch.json`) to launch an **Extension Development Host** window.
 3. Open a trusted workspace folder in the Extension Development Host window.
 
 ---
@@ -94,8 +94,8 @@ npm run build
 
 ### Initial Setup in VS Code
 
-1. Click the **AgentoCode** icon in the Activity Bar to open the **Chat** and **Knowledge & Index** views.
-2. Click **Set Groq Key** (or run `AgentoCode: Set Groq API Key` from the Command Palette). Your key is stored in VS Code `SecretStorage`, not inside workspace files.
+1. Set `GROQ_API_KEY` in a local `.env` file (see `.env.example`; `.env` is excluded by `.gitignore` and `.vscodeignore`, and blocked from indexing/reading inside workspaces). You can place `.env` in your open workspace root or extension directory, or use `AgentoCode: Set Groq API Key` (`SecretStorage`) as a fallback.
+2. Click the **AgentoCode** icon in the Activity Bar to open the **Chat** and **Knowledge & Index** views.
 3. *(Optional)* Click **Preload Model** (or send `/preload` in chat) to download and warm `nomic-ai/nomic-embed-text-v1.5` (`q8` ONNX weights, cached once in VS Code global extension storage).
    - To run strictly offline without cached weights (`agentocode.localFilesOnly: true`) or without downloading ONNX weights, set `agentocode.embedProvider` to `"lexical_only"` or `"ollama"`.
 4. Click **Sync** (or send `/sync` in chat) to parse workspace files and populate the local vector index.
@@ -179,8 +179,8 @@ All settings live under the `agentocode` namespace in VS Code Settings:
 
 ## Security and Workspace Boundaries
 
-- **Workspace Trust Required:** `capabilities.untrustedWorkspaces.supported` is `false`. Indexing, worker spawning, and chat are disabled until you trust the workspace.
-- **Containment & Exclusions:** All workspace reads and edit proposals verify realpaths against the workspace root (`fs.realpathSync`), rejecting `..` traversals, outside-root symlinks/junctions, hidden directories (`.git`, `.venv`, `node_modules`, `.guardian`, `knowledge_base`), credential patterns (`.env`, `.env.*` excluding templates, `*.pem`, `*.key`, `id_rsa*`, `*secret*`, `*credentials*`), binary files, and files over `512,000` bytes.
+- **Workspace Trust Required:** `capabilities.untrustedWorkspaces.supported` is `false`. Indexing, worker spawning, `.env` reading, and chat are disabled until you trust the workspace.
+- **Containment & Exclusions:** All workspace reads and edit proposals verify realpaths against the workspace root (`fs.realpathSync`), rejecting `..` traversals, outside-root symlinks/junctions, hidden directories (`.git`, `.venv`, `node_modules`, `.guardian`, `knowledge_base`), credential patterns (`.env`, `.env.*` excluding templates, `*.pem`, `*.key`, `id_rsa*`, `*secret*`, `*credentials*`), binary files, and files over `512,000` bytes. Thus `.env` containing `GROQ_API_KEY` cannot be indexed into vectors or read by model tools.
 - **No Arbitrary Shell Tool:** The agent has no terminal/shell execution tool.
 - **Dirty-Buffer Protection:** Tool reads check open unsaved VS Code documents first, and edit application warns before overwriting if a file changed after proposal generation.
 
@@ -199,20 +199,20 @@ All settings live under the `agentocode` namespace in VS Code Settings:
 
 ### Test Coverage (`test/`)
 
-- [test/workspace.test.ts](test/workspace.test.ts) — Path containment, exclusions, binary/size checks, reversible encoding, atomic retries.
-- [test/facts.test.ts](test/facts.test.ts) — TypeScript AST, Python structural parsing, Markdown splitting, oversized fragmenting, OKF rendering.
-- [test/vector_store_and_embeddings.test.ts](test/vector_store_and_embeddings.test.ts) — Fingerprinting, normalization, vector persistence/deletion compaction, corrupt-store quarantine, model prefixes, local HTTP `OllamaEmbedder`, and `LexicalOnlyEmbedder`.
-- [test/rag_and_vectors.test.ts](test/rag_and_vectors.test.ts) — Incremental sync, no-op caching, import-dependent refresh, staleness rejection, overlength tracking, and lexical fallback.
-- [test/groq_and_agent_edges.test.ts](test/groq_and_agent_edges.test.ts) — Local HTTP SSE `GroqHttpClient` streaming/errors/abort, `AgentLoop` error/iteration bounds, and settings resolution.
-- [test/agent_and_mcp.test.ts](test/agent_and_mcp.test.ts) — Tool filtering (`write_file` blocked), multi-turn `AgentLoop`, compiled worker MCP stdio round-trip (`lexical_only`), and `@huggingface/transformers` module loading under `localFilesOnly`.
-- [test/mcp_worker_edges.test.ts](test/mcp_worker_edges.test.ts) — Compiled worker containment errors, subdir deletion pruning, force sync, and raw stdout/stderr wire isolation.
-- [test/ide_and_ui.test.ts](test/ide_and_ui.test.ts) — Markdown XSS sanitization, `DiffProposalManager`, `ideContext`, and `KnowledgeTreeProvider` against a mocked `vscode` API shim.
-- [test/extension_lifecycle.test.ts](test/extension_lifecycle.test.ts) — `activate`/`deactivate`, command registration, `SecretStorage`, Webview CSP/nonces, and chat slash commands.
-- [test/manifest_integrity.test.ts](test/manifest_integrity.test.ts) — Manifest consistency, `.gitignore` safety checks, and CI workflow verification.
+- `test/workspace.test.ts` — Path containment, exclusions, binary/size checks, reversible encoding, atomic retries.
+- `test/facts.test.ts` — TypeScript AST, Python structural parsing, Markdown splitting, oversized fragmenting, OKF rendering.
+- `test/vector_store_and_embeddings.test.ts` — Fingerprinting, normalization, vector persistence/deletion compaction, corrupt-store quarantine, model prefixes, local HTTP `OllamaEmbedder`, `TransformersOnnxEmbedder`, and `LexicalOnlyEmbedder`.
+- `test/rag_and_vectors.test.ts` — Incremental sync, no-op caching, import-dependent refresh, staleness rejection, overlength tracking, and lexical fallback.
+- `test/groq_and_agent_edges.test.ts` — Local HTTP SSE `GroqHttpClient` streaming/errors/abort, `AgentLoop` error/iteration bounds, and settings resolution.
+- `test/agent_and_mcp.test.ts` — Tool filtering (`write_file` blocked), multi-turn `AgentLoop`, compiled worker MCP stdio round-trip (`lexical_only`), and `@huggingface/transformers` module loading under `localFilesOnly`.
+- `test/mcp_worker_edges.test.ts` — Compiled worker containment errors, subdir deletion pruning, force sync, and raw stdout/stderr wire isolation.
+- `test/ide_and_ui.test.ts` — Markdown XSS sanitization, `DiffProposalManager`, `ideContext`, and `KnowledgeTreeProvider` against a mocked `vscode` API shim.
+- `test/extension_lifecycle.test.ts` — `activate`/`deactivate`, command registration, `SecretStorage`, Webview CSP/nonces, config-reload scoping, debounced save sync, and chat slash commands.
+- `test/manifest_integrity.test.ts` — Manifest consistency, `.gitignore` safety checks, and CI workflow verification.
 
 ### GitHub Actions CI
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs on every `push` and `pull_request` across `ubuntu-latest` and `windows-latest` (Node 22):
+`.github/workflows/ci.yml` runs on every `push` and `pull_request` across `ubuntu-latest` and `windows-latest` (Node 22):
 
 1. `npm ci`
 2. `npm run typecheck`

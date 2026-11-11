@@ -93,7 +93,7 @@ class AsyncMutex {
   }
 }
 
-interface LoadedTransformersPipeline {
+export interface LoadedTransformersPipeline {
   (text: string, options?: { pooling?: string; normalize?: boolean }): Promise<{
     data: ArrayLike<number>;
     dims?: number[];
@@ -103,6 +103,14 @@ interface LoadedTransformersPipeline {
   };
   dispose?: () => Promise<void>;
 }
+
+export type TransformersPipelineLoader = (options: {
+  modelId: string;
+  modelRevision: string;
+  dtype: EmbedDtype;
+  localFilesOnly: boolean;
+  cacheDir?: string;
+}) => Promise<LoadedTransformersPipeline>;
 
 /**
  * Local ONNX embedding provider using @huggingface/transformers with serialized batch-1 inference
@@ -128,6 +136,7 @@ export class TransformersOnnxEmbedder implements EmbedderProvider {
       maxTokens: number;
       cacheDir?: string;
       onLog?: (line: string) => void;
+      pipelineLoader?: TransformersPipelineLoader;
     },
   ) {
     const prefixes = resolveModelPrefixes(options.modelId);
@@ -171,20 +180,29 @@ export class TransformersOnnxEmbedder implements EmbedderProvider {
         this.options.onLog?.(
           `Loading local ONNX model ${this.options.modelId} (revision=${this.options.modelRevision || 'default'}, dtype=${this.options.dtype}, localOnly=${this.options.localFilesOnly})...`,
         );
-        const transformers = await import('@huggingface/transformers');
-        transformers.env.allowRemoteModels = !this.options.localFilesOnly;
-        transformers.env.useFSCache = true;
-        if (this.options.cacheDir) {
-          transformers.env.cacheDir = this.options.cacheDir;
-        }
+        const pipe = this.options.pipelineLoader
+          ? await this.options.pipelineLoader({
+              modelId: this.options.modelId,
+              modelRevision: this.options.modelRevision,
+              dtype: this.options.dtype,
+              localFilesOnly: this.options.localFilesOnly,
+              cacheDir: this.options.cacheDir,
+            })
+          : await (async () => {
+              const transformers = await import('@huggingface/transformers');
+              transformers.env.allowRemoteModels = !this.options.localFilesOnly;
+              transformers.env.useFSCache = true;
+              if (this.options.cacheDir) {
+                transformers.env.cacheDir = this.options.cacheDir;
+              }
+              return (await transformers.pipeline('feature-extraction', this.options.modelId, {
+                revision: this.options.modelRevision || undefined,
+                dtype: this.options.dtype,
+                local_files_only: this.options.localFilesOnly,
+              })) as unknown as LoadedTransformersPipeline;
+            })();
 
-        const pipe = await transformers.pipeline('feature-extraction', this.options.modelId, {
-          revision: this.options.modelRevision || undefined,
-          dtype: this.options.dtype,
-          local_files_only: this.options.localFilesOnly,
-        });
-
-        this.pipelineInstance = pipe as unknown as LoadedTransformersPipeline;
+        this.pipelineInstance = pipe;
         this.loadCount++;
         this.state = 'ready';
         this.options.onLog?.(`Local embedding model ready (loadCount=${this.loadCount}).`);

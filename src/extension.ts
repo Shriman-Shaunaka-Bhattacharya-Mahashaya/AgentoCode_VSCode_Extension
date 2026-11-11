@@ -9,6 +9,7 @@ import {
   resolveNodeRuntime,
   resolveStorageDirectories,
 } from './config/settings.js';
+import { resolveGroqApiKey } from './config/envLoader.js';
 import { DiffProposalManager } from './editor/diffManager.js';
 import { McpWorkerClient } from './mcp/workerClient.js';
 import {
@@ -134,9 +135,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     () => updateStatusBar(),
   );
 
+  const getResolvedApiKey = async () =>
+    resolveGroqApiKey({
+      workspaceRoot: vscode.workspace.isTrusted ? getWorkspaceRoot() : undefined,
+      extensionPath: context.extensionPath,
+      getSecret: () => context.secrets.get(GROQ_SECRET_KEY),
+    });
+
   const hasGroqApiKey = async (): Promise<boolean> => {
-    const stored = await context.secrets.get(GROQ_SECRET_KEY);
-    return Boolean(stored && stored.trim().length > 0);
+    const resolved = await getResolvedApiKey();
+    return Boolean(resolved.apiKey);
   };
 
   const updateStatusBar = () => {
@@ -354,10 +362,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
 
-    const apiKey = (await context.secrets.get(GROQ_SECRET_KEY))?.trim();
+    const resolvedKey = await getResolvedApiKey();
+    const apiKey = resolvedKey.apiKey;
     if (!apiKey) {
       const choice = await vscode.window.showWarningMessage(
-        'Groq API key is not set. Set it now to query AgentoCode.',
+        'GROQ_API_KEY is not set in .env, environment variables, or SecretStorage.',
         'Set Groq API Key',
       );
       if (choice === 'Set Groq API Key') {
@@ -592,7 +601,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidSaveTextDocument((doc) => {
       const root = getWorkspaceRoot();
-      if (!root || !vscode.workspace.isTrusted || !getConfig().autoSyncOnSave) {
+      if (!root || !vscode.workspace.isTrusted) {
+        return;
+      }
+      if (doc.uri.scheme === 'file' && path.basename(doc.uri.fsPath) === '.env') {
+        void refreshStatusAndViews(true);
+        return;
+      }
+      if (!getConfig().autoSyncOnSave) {
         return;
       }
       if (doc.uri.scheme !== 'file') {
